@@ -96,7 +96,10 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
     } 
 
     try {
-      Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+      Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.medium,
+        timeLimit: const Duration(seconds: 10),
+      );
       if (mounted) {
         setState(() {
           _currentLatLng = LatLng(position.latitude, position.longitude);
@@ -131,6 +134,9 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
             setState(() {
               _currentLocationName = name;
               _currentLocationCity = city;
+              if (_originSearchCtrl.text.isEmpty) {
+                _originSearchCtrl.text = city;
+              }
             });
           }
         }
@@ -142,15 +148,18 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
 
   Future<void> _fetchAllCities() async {
     try {
-      final res = await Supabase.instance.client.from('return_requirements').select('origin, destination');
+      final res = await Supabase.instance.client
+          .from('truck_availability')
+          .select('origin_city, destination_city')
+          .eq('status', 'available');
       final list = res as List;
       final Set<String> cities = Set.from(_availableCities);
       for (var row in list) {
-        if (row['origin'] != null && row['origin'].toString().trim().isNotEmpty) {
-          cities.add(row['origin'].toString().trim());
+        if (row['origin_city'] != null && row['origin_city'].toString().trim().isNotEmpty) {
+          cities.add(row['origin_city'].toString().trim());
         }
-        if (row['destination'] != null && row['destination'].toString().trim().isNotEmpty) {
-          cities.add(row['destination'].toString().trim());
+        if (row['destination_city'] != null && row['destination_city'].toString().trim().isNotEmpty) {
+          cities.add(row['destination_city'].toString().trim());
         }
       }
       setState(() {
@@ -168,22 +177,32 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
     super.dispose();
   }
 
-    Future<void> _fetchRoutesFromSupabase() async {
+    Future<void> _fetchRoutesFromSupabase({String? filterOriginCity}) async {
     setState(() => _isLoadingRoutes = true);
     try {
-      final res = await Supabase.instance.client
-          .from('return_requirements')
-          .select('origin, destination, route_date, status')
-          .limit(20);
+      // If a city is selected/searched, only show routes FROM that city
+      final originFilter = filterOriginCity ?? _originSearchCtrl.text.split(',').first.trim();
+
+      var query = Supabase.instance.client
+          .from('truck_availability')
+          .select('origin_city, destination_city, available_date, status')
+          .inFilter('status', ['available', 'partially_available', 'active']);
+
+      // Filter by origin city if user has selected one
+      if (originFilter.isNotEmpty) {
+        query = query.ilike('origin_city', '%$originFilter%');
+      }
+
+      final res = await query.order('available_date', ascending: true).limit(20);
 
       final list = res as List;
       final Set<String> seen = {};
       final List<Map<String, String>> routes = [];
 
       for (var row in list) {
-        final origin = (row['origin'] ?? '').toString().trim();
-        final dest = (row['destination'] ?? '').toString().trim();
-        final date = (row['route_date'] ?? '').toString();
+        final origin = (row['origin_city'] ?? '').toString().trim();
+        final dest = (row['destination_city'] ?? '').toString().trim();
+        final date = (row['available_date'] ?? '').toString();
 
         if (origin.isNotEmpty && dest.isNotEmpty) {
           final key = '$origin-$dest';
@@ -194,25 +213,19 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
               'subtitle': 'From $origin • $date',
               'origin': origin,
               'dest': dest,
-              'date': date.isNotEmpty ? date : '15-21 Jan',
-              'price': '₹10,805', // dummy for UI
+              'date': date.isNotEmpty ? date : '',
+              'price': '₹10,805', // indicative price
             });
           }
         }
       }
 
-      // Add dummy data for UI display if empty or just for matching design
-      if (routes.isEmpty) {
+      // Show placeholder routes only when no filter is applied and DB is empty
+      if (routes.isEmpty && originFilter.isEmpty) {
         routes.addAll([
-          {
-            'title': 'Mumbai', 'subtitle': '', 'origin': 'Ahmedabad', 'dest': 'Mumbai', 'date': '15-21 Jan', 'price': '₹10,805'
-          },
-          {
-            'title': 'Pune', 'subtitle': '', 'origin': 'Ahmedabad', 'dest': 'Pune', 'date': '2-8 Jan', 'price': '₹11,382'
-          },
-          {
-            'title': 'Delhi', 'subtitle': '', 'origin': 'Ahmedabad', 'dest': 'Delhi', 'date': '10-14 Feb', 'price': '₹15,400'
-          }
+          {'title': 'Mumbai', 'subtitle': '', 'origin': 'Ahmedabad', 'dest': 'Mumbai', 'date': '15-21 Jan', 'price': '₹10,805'},
+          {'title': 'Pune', 'subtitle': '', 'origin': 'Ahmedabad', 'dest': 'Pune', 'date': '2-8 Jan', 'price': '₹11,382'},
+          {'title': 'Delhi', 'subtitle': '', 'origin': 'Ahmedabad', 'dest': 'Delhi', 'date': '10-14 Feb', 'price': '₹15,400'},
         ]);
       }
 
@@ -229,7 +242,8 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
   Future<Map<String, dynamic>?> _geocodeCityDetails(String query) async {
     try {
       final token = 'pk.eyJ1IjoidG9tODE1NSIsImEiOiJjbXJheGkzZHoyNms2MndxcmE2N3NidzFhIn0.UT6Ql_m2sJScB7mKiIN9MQ';
-      final url = Uri.parse('https://api.mapbox.com/geocoding/v5/mapbox.places/${Uri.encodeComponent(query)}.json?access_token=$token&limit=1');
+      // Strictly restrict geocoding to India
+      final url = Uri.parse('https://api.mapbox.com/geocoding/v5/mapbox.places/${Uri.encodeComponent(query)}.json?country=IN&access_token=$token&limit=1');
       final response = await http.get(url);
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
@@ -265,13 +279,16 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
     if (query.isEmpty) return const [];
     try {
       final token = 'pk.eyJ1IjoidG9tODE1NSIsImEiOiJjbXJheGkzZHoyNms2MndxcmE2N3NidzFhIn0.UT6Ql_m2sJScB7mKiIN9MQ';
-      // Proximity biased towards current GPS location
-      final url = Uri.parse('https://api.mapbox.com/geocoding/v5/mapbox.places/${Uri.encodeComponent(query)}.json?access_token=$token&autocomplete=true&proximity=${_currentLatLng.longitude},${_currentLatLng.latitude}&limit=5');
+      // Strictly restrict suggestions to India only (country=IN)
+      final url = Uri.parse('https://api.mapbox.com/geocoding/v5/mapbox.places/${Uri.encodeComponent(query)}.json?country=IN&types=place,locality,district,region,postcode&access_token=$token&autocomplete=true&proximity=${_currentLatLng.longitude},${_currentLatLng.latitude}&limit=6');
       final response = await http.get(url);
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         if (data['features'] != null) {
-          return (data['features'] as List).map((f) => f['place_name'].toString()).toList();
+          return (data['features'] as List)
+              .map((f) => f['place_name'].toString())
+              .where((name) => name.toLowerCase().contains('india'))
+              .toList();
         }
       }
     } catch (e) {
@@ -338,47 +355,84 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
         }
       }
 
-      var query = Supabase.instance.client.from('return_requirements').select();
+      // Extract pure city name (e.g. 'Mumbai, Maharashtra, India' -> 'Mumbai')
+      String cleanCity(String text) {
+        if (text.isEmpty) return '';
+        final firstPart = text.split(',').first.trim();
+        return firstPart.split(' ').first.trim();
+      }
 
-      if (originCity.isNotEmpty) query = query.ilike('origin_city', '%$originCity%');
-      if (destCity.isNotEmpty) query = query.ilike('destination_city', '%$destCity%');
-      
-      // Removed exact date match for now to ensure data always shows up for testing, 
-      // or we can just filter if needed. Let's just filter by ACTIVE status.
-      query = query.eq('status', 'ACTIVE');
+      final queryOrigin = cleanCity(originCity);
+      final queryDest = cleanCity(destCity);
 
-      final response = await query.order('created_at', ascending: false).limit(20);
-      final list = response as List;
+      // Log this search into Supabase `search_requests` table
+      String? currentSearchRequestId;
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final storedCustomerId = prefs.getString('customer_id');
+
+        final searchPayload = {
+          if (storedCustomerId != null) 'customer_id': storedCustomerId,
+          'pickup_location': originCity.isNotEmpty ? originCity : queryOrigin,
+          'pickup_city': queryOrigin,
+          'drop_location': destCity.isNotEmpty ? destCity : queryDest,
+          'drop_city': queryDest,
+          'required_date': DateFormat('yyyy-MM-dd').format(DateTime.now()),
+          'search_status': 'active',
+        };
+
+        final searchRes = await Supabase.instance.client
+            .from('search_requests')
+            .insert(searchPayload)
+            .select('id')
+            .maybeSingle();
+
+        if (searchRes != null) {
+          currentSearchRequestId = searchRes['id']?.toString();
+        }
+      } catch (err) {
+        debugPrint('search_requests log error: $err');
+      }
+
+      debugPrint('Searching trucks with raw inputs origin: "${_originSearchCtrl.text}", dest: "${_destSearchCtrl.text}"');
+      debugPrint('Parsed cities -> Origin: "$queryOrigin", Dest: "$queryDest"');
+
+      // 1. Strict route & date match from truck_availability table
+      var query = Supabase.instance.client
+          .from('truck_availability').select('*, trucks(truck_number, truck_type), partners(owner_name, mobile_number)')
+          .inFilter('status', ['available', 'partially_available', 'active']);
+
+      if (queryOrigin.isNotEmpty) {
+        query = query.ilike('origin_city', '%$queryOrigin%');
+      }
+      if (queryDest.isNotEmpty) {
+        query = query.ilike('destination_city', '%$queryDest%');
+      }
+
+      // Filter strictly by the selected date (Format: YYYY-MM-DD)
+      final formattedSelectedDate = DateFormat('yyyy-MM-dd').format(_selectedDate);
+      query = query.eq('available_date', formattedSelectedDate);
+
+      var response = await query.order('available_date', ascending: true).limit(20);
+      var list = response as List;
 
       List<dynamic> enriched = [];
       for (var req in list) {
-        dynamic partner;
-        dynamic truck;
-        try {
-          if (req['partner_id'] != null) {
-            partner = await Supabase.instance.client
-                .from('partner_profiles')
-                .select('owner_name, mobile_number')
-                .eq('id', req['partner_id'])
-                .maybeSingle();
-          }
-        } catch (_) {}
-
-        try {
-          if (req['truck_id'] != null) {
-            truck = await Supabase.instance.client
-                .from('trucks')
-                .select('vehicle_number, vehicle_type')
-                .eq('id', req['truck_id'])
-                .maybeSingle();
-          }
-        } catch (_) {}
-
         enriched.add({
           ...req,
-          'partner_profiles': partner,
-          'trucks': truck,
+          'partner_profiles': req['partners'],
+          'trucks': req['trucks'],
+          'search_request_id': currentSearchRequestId,
         });
+      }
+
+      if (currentSearchRequestId != null) {
+        try {
+          await Supabase.instance.client
+              .from('search_requests')
+              .update({'results_count': enriched.length})
+              .eq('id', currentSearchRequestId);
+        } catch (_) {}
       }
 
       setState(() {
@@ -408,6 +462,9 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) {
+        final modalOriginCtrl = TextEditingController(text: _originSearchCtrl.text);
+        final modalDestCtrl = TextEditingController(text: _destSearchCtrl.text);
+
         return StatefulBuilder(
           builder: (context, setModalState) {
             return Container(
@@ -477,7 +534,7 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
                                   const SizedBox(width: 14),
                                   Expanded(
                                     child: Autocomplete<String>(
-                                      initialValue: TextEditingValue(text: _originSearchCtrl.text),
+                                      initialValue: TextEditingValue(text: modalOriginCtrl.text),
                                       optionsBuilder: (TextEditingValue textEditingValue) async {
                                         if (textEditingValue.text.isEmpty) {
                                           return const Iterable<String>.empty();
@@ -485,15 +542,18 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
                                         return await _fetchPlaceSuggestions(textEditingValue.text);
                                       },
                                       onSelected: (String selection) {
+                                        modalOriginCtrl.text = selection;
                                         _originSearchCtrl.text = selection;
+                                        setModalState(() {});
                                       },
                                       fieldViewBuilder: (BuildContext context, TextEditingController textEditingController, FocusNode focusNode, VoidCallback onFieldSubmitted) {
-                                        textEditingController.addListener(() {
-                                          _originSearchCtrl.text = textEditingController.text;
-                                        });
                                         return TextField(
                                           controller: textEditingController,
                                           focusNode: focusNode,
+                                          onChanged: (val) {
+                                            modalOriginCtrl.text = val;
+                                            _originSearchCtrl.text = val;
+                                          },
                                           decoration: InputDecoration(
                                             hintText: 'Where from?',
                                             hintStyle: TextStyle(color: Colors.grey.shade400, fontWeight: FontWeight.normal),
@@ -547,6 +607,7 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
                                       },
                                     ),
                                   ),
+                                  const SizedBox(width: 40), // Space for Swap Button
                                 ],
                               ),
                               Padding(
@@ -560,7 +621,7 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
                                   const SizedBox(width: 14),
                                   Expanded(
                                     child: Autocomplete<String>(
-                                      initialValue: TextEditingValue(text: _destSearchCtrl.text),
+                                      initialValue: TextEditingValue(text: modalDestCtrl.text),
                                       optionsBuilder: (TextEditingValue textEditingValue) async {
                                         if (textEditingValue.text.isEmpty) {
                                           return const Iterable<String>.empty();
@@ -568,16 +629,18 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
                                         return await _fetchPlaceSuggestions(textEditingValue.text);
                                       },
                                       onSelected: (String selection) {
+                                        modalDestCtrl.text = selection;
                                         _destSearchCtrl.text = selection;
+                                        setModalState(() {});
                                       },
                                       fieldViewBuilder: (BuildContext context, TextEditingController textEditingController, FocusNode focusNode, VoidCallback onFieldSubmitted) {
-                                        textEditingController.addListener(() {
-                                          _destSearchCtrl.text = textEditingController.text;
-                                        });
                                         return TextField(
                                           controller: textEditingController,
                                           focusNode: focusNode,
-                                          autofocus: true,
+                                          onChanged: (val) {
+                                            modalDestCtrl.text = val;
+                                            _destSearchCtrl.text = val;
+                                          },
                                           decoration: InputDecoration(
                                             hintText: 'Where to?',
                                             hintStyle: TextStyle(color: Colors.grey.shade400, fontWeight: FontWeight.normal),
@@ -660,9 +723,12 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
                             child: IconButton(
                               icon: const Icon(Icons.swap_vert_rounded, color: Color(0xFF3B82F6)),
                               onPressed: () {
-                                final temp = _originSearchCtrl.text;
-                                _originSearchCtrl.text = _destSearchCtrl.text;
-                                _destSearchCtrl.text = temp;
+                                final temp = modalOriginCtrl.text;
+                                modalOriginCtrl.text = modalDestCtrl.text;
+                                modalDestCtrl.text = temp;
+
+                                _originSearchCtrl.text = modalOriginCtrl.text;
+                                _destSearchCtrl.text = modalDestCtrl.text;
                                 setModalState(() {});
                               },
                             ),
@@ -801,6 +867,9 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
                       height: 56,
                       child: ElevatedButton(
                         onPressed: () async {
+                          _originSearchCtrl.text = modalOriginCtrl.text.trim();
+                          _destSearchCtrl.text = modalDestCtrl.text.trim();
+
                           // Update modal state to show loading
                           setModalState(() {
                             _hasSearched = true;
@@ -861,9 +930,17 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
               children: [
                 FlutterMap(
                   mapController: _mapController,
-                  options: const MapOptions(
-                    initialCenter: LatLng(23.0225, 72.5714),
-                    initialZoom: 13.5,
+                  options: MapOptions(
+                    initialCenter: const LatLng(20.5937, 78.9629), // Center of India
+                    initialZoom: 5.5,
+                    minZoom: 4.0,
+                    maxZoom: 18.0,
+                    cameraConstraint: CameraConstraint.contain(
+                      bounds: LatLngBounds(
+                        const LatLng(6.5546, 68.1113),  // South-West corner of India
+                        const LatLng(35.6745, 97.3953), // North-East corner of India
+                      ),
+                    ),
                   ),
                   children: [
                     TileLayer(
@@ -1044,6 +1121,9 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
                         if (confirm == true) {
                           final prefs = await SharedPreferences.getInstance();
                           await prefs.remove('logged_in_phone');
+                          await prefs.remove('user_full_name');
+                          await prefs.remove('user_email');
+                          await prefs.remove('user_gender');
                           if (!context.mounted) return;
                           context.go('/login');
                         }
@@ -1524,14 +1604,14 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
     final partner = item['partner_profiles'];
     final truck = item['trucks'];
     final ownerName = partner != null ? partner['owner_name'] ?? 'Translink Partner' : 'Translink Partner';
-    final truckNo = truck != null ? (truck['vehicle_number'] ?? truck['truck_number'] ?? 'Truck Available') : 'Truck Available';
-    final vehicleType = truck != null ? truck['vehicle_type'] ?? '14 - 32 Ft Truck' : 'Available Load';
-    final mobile = partner != null ? partner['mobile_number'] ?? '' : '';
+    final truckNo = truck != null ? (truck['truck_number'] ?? truck['vehicle_number'] ?? 'Truck Available') : 'Truck Available';
+    final vehicleType = truck != null ? (truck['truck_type'] ?? truck['vehicle_type'] ?? '14 - 32 Ft Truck') : 'Available Load';
+    final mobile = partner != null ? (partner['mobile'] ?? partner['mobile_number'] ?? '') : '';
     final rating = partner != null && partner['rating'] != null ? partner['rating'].toString() : '4.8';
 
     final origin = item['origin_city'] ?? 'Ahmedabad';
     final destination = item['destination_city'] ?? 'Mumbai';
-    final requiredDate = item['required_date'] ?? '24 Jan'; // Default based on mockup style
+    final requiredDate = item['available_date'] ?? item['required_date'] ?? 'Available Today';
 
     return InkWell(
       onTap: () {
@@ -1734,9 +1814,22 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
                     children: [
                       const Icon(Icons.calendar_month, color: Colors.grey, size: 18),
                       const SizedBox(width: 12),
-                      Text('Available: ${item['required_date'] ?? 'Immediate'}', style: TextStyle(fontSize: 13, color: Colors.grey.shade600)),
+                      Text('Available: ${item['available_date'] ?? item['required_date'] ?? 'Immediate'}', style: TextStyle(fontSize: 13, color: Colors.grey.shade600)),
                     ],
                   ),
+                  if (item['trucks'] != null && (item['trucks']['capacity_tons'] != null || item['trucks']['capacity_kg'] != null)) ...[
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        const Icon(Icons.fitness_center, color: Colors.grey, size: 18),
+                        const SizedBox(width: 12),
+                        Text(
+                          'Capacity: ${item['trucks']['capacity_tons'] != null ? '${item['trucks']['capacity_tons']} Tons' : '${item['trucks']['capacity_kg']} Kg'}',
+                          style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
+                        ),
+                      ],
+                    ),
+                  ],
                   
                   const SizedBox(height: 20),
                   Divider(color: Colors.grey.shade100, height: 1),
@@ -1773,6 +1866,21 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
                               if (await canLaunchUrl(launchUri)) {
                                 await launchUrl(launchUri);
                               }
+                              // Log direct dial call into contact_logs
+                              try {
+                                final prefs = await SharedPreferences.getInstance();
+                                final customerId = prefs.getString('customer_id');
+                                final profileId = prefs.getString('profile_id');
+                                await Supabase.instance.client.from('contact_logs').insert({
+                                  if (customerId != null) 'customer_id': customerId,
+                                  'partner_id': item['partner_id'],
+                                  'truck_id': item['truck_id'],
+                                  if (profileId != null) 'performed_by': profileId,
+                                  'contact_type': 'call',
+                                  'contact_direction': 'outbound',
+                                  'outcome': 'dialed',
+                                });
+                              } catch (_) {}
                             },
                             icon: const Icon(Icons.call, size: 20),
                             label: Text('Dial: $mobile', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, letterSpacing: 1.2)),
@@ -1787,26 +1895,58 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
                               if (mobile.isNotEmpty) {
                                 setModalState(() => isSaving = true);
                                 try {
-                                  // Log view to Supabase
-                                  final prefs = await SharedPreferences.getInstance();
-                                  final customerPhone = prefs.getString('logged_in_phone') ?? 'Guest';
+                                  // Save locally for Contacts Tab first
+                                  await _saveContactedDriver(item, ownerName, truckNo, vehicleType, mobile);
                                   
-                                  await Supabase.instance.client.from('driver_number_views').insert({
-                                    'customer_phone': customerPhone,
-                                    'partner_id': item['partner_id'],
-                                    'owner_name': ownerName,
-                                    'truck_number': truckNo,
-                                    'origin': item['origin_city'] ?? '',
-                                    'destination': item['destination_city'] ?? '',
-                                  });
+                                  // Log contact view to Supabase database (kis user ne kiska contact dekha)
+                                  try {
+                                    final prefs = await SharedPreferences.getInstance();
+                                    final customerPhone = prefs.getString('logged_in_phone') ?? 'Guest';
+                                    final customerName = prefs.getString('user_full_name') ?? 'Translink User';
+                                    final customerId = prefs.getString('customer_id');
+                                    final profileId = prefs.getString('profile_id');
+                                    final searchRequestId = item['search_request_id'];
 
-                                  // Save locally for Contacts Tab
-                                  _saveContactedDriver(item, ownerName, truckNo, vehicleType, mobile);
-                                  
+                                    // 1. Log to contact_logs table (Direct schema match)
+                                    try {
+                                      await Supabase.instance.client.from('contact_logs').insert({
+                                        if (customerId != null) 'customer_id': customerId,
+                                        'partner_id': item['partner_id'],
+                                        'truck_id': item['truck_id'],
+                                        if (profileId != null) 'performed_by': profileId,
+                                        'contact_type': 'view_contact_number',
+                                        'contact_direction': 'outbound',
+                                        'outcome': 'contact_viewed',
+                                        'notes': 'Customer viewed contact number of truck $truckNo',
+                                      });
+                                    } catch (clErr) {
+                                      debugPrint('contact_logs error: $clErr');
+                                    }
+
+                                    // 2. Also log to driver_number_views table
+                                    try {
+                                      await Supabase.instance.client.from('driver_number_views').insert({
+                                        if (customerId != null) 'customer_id': customerId,
+                                        'customer_phone': customerPhone,
+                                        'customer_name': customerName,
+                                        'partner_id': item['partner_id'],
+                                        'truck_id': item['truck_id'],
+                                        'owner_name': ownerName,
+                                        'truck_number': truckNo,
+                                        'driver_phone': mobile,
+                                        'origin': item['origin_city'] ?? '',
+                                        'destination': item['destination_city'] ?? '',
+                                      });
+                                    } catch (_) {}
+                                  } catch (e) {
+                                    debugPrint('Database view logging notice: $e');
+                                  }
+
                                   setModalState(() {
                                     isNumberVisible = true;
                                     isSaving = false;
                                   });
+                                  if (mounted) setState(() {});
                                 } catch (e) {
                                   debugPrint('Error logging view: $e');
                                   // Fallback to reveal if network fails for smooth UX
@@ -1959,17 +2099,163 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
     );
   }
 
+  void _showEditProfileDialog(String currentName, String currentEmail, String currentGender) {
+    final nameController = TextEditingController(text: currentName == 'Translink User' ? '' : currentName);
+    final emailController = TextEditingController(text: currentEmail);
+    String selectedGender = currentGender.isNotEmpty ? currentGender.toUpperCase() : 'MALE';
+    if (!['MALE', 'FEMALE', 'OTHER'].contains(selectedGender)) {
+      selectedGender = 'MALE';
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text('Edit Profile', style: TextStyle(fontWeight: FontWeight.bold)),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Full Name', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey)),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: nameController,
+                  decoration: InputDecoration(
+                    hintText: 'Enter your full name',
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text('Email Address', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey)),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: emailController,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: InputDecoration(
+                    hintText: 'Enter your email',
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text('Gender', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey)),
+                const SizedBox(height: 6),
+                DropdownButtonFormField<String>(
+                  value: selectedGender,
+                  items: const [
+                    DropdownMenuItem(value: 'MALE', child: Text('Male')),
+                    DropdownMenuItem(value: 'FEMALE', child: Text('Female')),
+                    DropdownMenuItem(value: 'OTHER', child: Text('Other')),
+                  ],
+                  onChanged: (val) {
+                    if (val != null) {
+                      setDialogState(() => selectedGender = val);
+                    }
+                  },
+                  decoration: InputDecoration(
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF0284C7),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              onPressed: () async {
+                final newName = nameController.text.trim();
+                final newEmail = emailController.text.trim();
+                
+                final prefs = await SharedPreferences.getInstance();
+                if (newName.isNotEmpty) await prefs.setString('user_full_name', newName);
+                if (newEmail.isNotEmpty) await prefs.setString('user_email', newEmail);
+                await prefs.setString('user_gender', selectedGender);
+                final phone = prefs.getString('logged_in_phone');
+
+                final navigator = Navigator.of(ctx);
+                final messenger = ScaffoldMessenger.of(context);
+
+                if (phone != null && phone.isNotEmpty) {
+                  try {
+                    await Supabase.instance.client.from('profiles').update({
+                      if (newName.isNotEmpty) 'full_name': newName,
+                      if (newEmail.isNotEmpty) 'email': newEmail,
+                    }).eq('mobile_number', phone);
+                  } catch (e) {
+                    debugPrint('Supabase profile update warning: $e');
+                  }
+                }
+
+                if (mounted) {
+                  navigator.pop();
+                  setState(() {});
+                  messenger.showSnackBar(
+                    const SnackBar(content: Text('Profile updated successfully!')),
+                  );
+                }
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<Map<String, dynamic>?> _fetchUserProfile() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final phone = prefs.getString('logged_in_phone');
+      final localName = prefs.getString('user_full_name');
+      final localEmail = prefs.getString('user_email');
+
+      final localGender = prefs.getString('user_gender');
+
       if (phone != null && phone.isNotEmpty) {
-        final res = await Supabase.instance.client
-            .from('customers')
-            .select()
-            .eq('phone_number', phone)
-            .maybeSingle();
-        return res;
+        try {
+          final res = await Supabase.instance.client
+              .from('profiles')
+              .select()
+              .eq('mobile_number', phone)
+              .maybeSingle();
+          if (res != null) {
+            return {
+              ...res,
+              if (localGender != null && localGender.isNotEmpty) 'gender': localGender,
+            };
+          }
+        } catch (e) {
+          debugPrint('Supabase profile query error: $e');
+        }
+
+        // Return locally stored profile data if Supabase hasn't populated yet
+        if (localName != null && localName.isNotEmpty) {
+          return {
+            'full_name': localName,
+            'mobile_number': phone,
+            'email': localEmail ?? '',
+            'gender': localGender ?? '',
+          };
+        } else {
+          return {
+            'full_name': 'Translink User',
+            'mobile_number': phone,
+            'email': localEmail ?? '',
+            'gender': localGender ?? '',
+          };
+        }
       }
     } catch (e) {
       debugPrint('Profile fetch error: $e');
@@ -1987,83 +2273,156 @@ class _RapidoHomeScreenState extends State<RapidoHomeScreen> {
           }
 
           final userData = snapshot.data;
-          final name = userData?['name'] ?? 'Guest User';
-          final email = userData?['email'] ?? 'No email added';
-          final phone = userData?['phone_number'] ?? '';
+          final name = (userData?['full_name'] != null && userData!['full_name'].toString().isNotEmpty)
+              ? userData['full_name'].toString()
+              : 'Translink User';
+          final email = (userData?['email'] != null && userData!['email'].toString().isNotEmpty)
+              ? userData['email'].toString()
+              : 'Not provided';
+          final phone = userData?['mobile_number'] ?? '';
+          final gender = (userData?['gender'] != null && userData!['gender'].toString().isNotEmpty)
+              ? userData['gender'].toString().toUpperCase()
+              : 'NOT SPECIFIED';
           
-          return Padding(
-            padding: const EdgeInsets.all(20.0),
+          return SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 16.0),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'My Profile',
-                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Color(0xFF1E293B)),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'My Profile',
+                      style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Color(0xFF1E293B)),
+                    ),
+                    TextButton.icon(
+                      onPressed: () => _showEditProfileDialog(name, email == 'Not provided' ? '' : email, gender == 'NOT SPECIFIED' ? 'Male' : gender),
+                      icon: const Icon(Icons.edit, size: 18, color: Color(0xFF0284C7)),
+                      label: const Text('Edit', style: TextStyle(color: Color(0xFF0284C7), fontWeight: FontWeight.bold)),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 30),
+                const SizedBox(height: 18),
                 Center(
                   child: CircleAvatar(
-                    radius: 50,
-                    backgroundColor: const Color(0xFFF0FDF4),
+                    radius: 46,
+                    backgroundColor: const Color(0xFFE0F2FE),
                     child: Text(
-                      name.isNotEmpty ? name[0].toUpperCase() : 'G',
-                      style: const TextStyle(fontSize: 40, fontWeight: FontWeight.bold, color: Color(0xFF10B981)),
+                      name.isNotEmpty ? name[0].toUpperCase() : 'U',
+                      style: const TextStyle(fontSize: 38, fontWeight: FontWeight.bold, color: Color(0xFF0284C7)),
                     ),
                   ),
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 14),
                 Center(
                   child: Column(
                     children: [
                       Text(
                         name,
-                        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: Color(0xFF1E293B)),
+                        style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: Color(0xFF1E293B)),
                       ),
                       const SizedBox(height: 4),
                       Text(
                         phone,
-                        style: TextStyle(fontSize: 15, color: Colors.grey.shade600, fontWeight: FontWeight.w500),
+                        style: TextStyle(fontSize: 15, color: Colors.grey.shade600, fontWeight: FontWeight.w600),
                       ),
-                      if (email != 'No email added') ...[
-                        const SizedBox(height: 4),
-                        Text(
-                          email,
-                          style: TextStyle(fontSize: 14, color: Colors.grey.shade500),
-                        ),
-                      ]
                     ],
                   ),
                 ),
-                const SizedBox(height: 40),
+                const SizedBox(height: 24),
+
+                // Details Card (Name, Mobile, Email, Gender)
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF8FAFC),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: Colors.grey.shade200),
+                  ),
+                  child: Column(
+                    children: [
+                      _buildProfileDetailRow(Icons.person_outline, 'Full Name', name),
+                      Divider(height: 20, color: Colors.grey.shade200),
+                      _buildProfileDetailRow(Icons.phone_outlined, 'Mobile Number', phone),
+                      Divider(height: 20, color: Colors.grey.shade200),
+                      _buildProfileDetailRow(Icons.email_outlined, 'Email', email),
+                      Divider(height: 20, color: Colors.grey.shade200),
+                      _buildProfileDetailRow(
+                        gender.toLowerCase().contains('fem') ? Icons.female : Icons.male,
+                        'Gender',
+                        gender,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+
                 ListTile(
-                  leading: const Icon(Icons.history_rounded, color: Color(0xFF1E293B)),
-                  title: const Text('My Viewed Contacts', style: TextStyle(fontWeight: FontWeight.w600)),
-                  trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                  contentPadding: EdgeInsets.zero,
+                  leading: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(color: Colors.grey.shade100, shape: BoxShape.circle),
+                    child: const Icon(Icons.history_rounded, color: Color(0xFF1E293B), size: 20),
+                  ),
+                  title: const Text('My Viewed Contacts', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+                  trailing: const Icon(Icons.arrow_forward_ios, size: 14, color: Colors.grey),
                   onTap: () {
                     setState(() => _selectedTabIndex = 1);
                   },
                 ),
                 ListTile(
-                  leading: const Icon(Icons.help_outline, color: Color(0xFF1E293B)),
-                  title: const Text('Help & Support'),
-                  trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                  contentPadding: EdgeInsets.zero,
+                  leading: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(color: Colors.grey.shade100, shape: BoxShape.circle),
+                    child: const Icon(Icons.help_outline, color: Color(0xFF1E293B), size: 20),
+                  ),
+                  title: const Text('Help & Support', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+                  trailing: const Icon(Icons.arrow_forward_ios, size: 14, color: Colors.grey),
                   onTap: () {},
                 ),
                 ListTile(
-                  leading: const Icon(Icons.logout, color: Colors.red),
-                  title: const Text('Logout', style: TextStyle(color: Colors.red, fontWeight: FontWeight.w600)),
+                  contentPadding: EdgeInsets.zero,
+                  leading: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(color: Colors.red.shade50, shape: BoxShape.circle),
+                    child: const Icon(Icons.logout, color: Colors.red, size: 20),
+                  ),
+                  title: const Text('Logout', style: TextStyle(color: Colors.red, fontWeight: FontWeight.w700, fontSize: 15)),
                   onTap: () async {
-                     final prefs = await SharedPreferences.getInstance();
-                     await prefs.remove('logged_in_phone');
-                     if (!context.mounted) return;
-                     context.go('/login');
+                    final prefs = await SharedPreferences.getInstance();
+                    await prefs.remove('logged_in_phone');
+                    await prefs.remove('user_full_name');
+                    await prefs.remove('user_email');
+                    await prefs.remove('user_gender');
+                    if (!context.mounted) return;
+                    context.go('/login');
                   },
                 ),
+                const SizedBox(height: 20),
               ],
             ),
           );
         }
       ),
+    );
+  }
+
+  Widget _buildProfileDetailRow(IconData icon, String label, String value) {
+    return Row(
+      children: [
+        Icon(icon, size: 20, color: const Color(0xFF64748B)),
+        const SizedBox(width: 12),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label, style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8), fontWeight: FontWeight.w500)),
+            const SizedBox(height: 2),
+            Text(value, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Color(0xFF1E293B))),
+          ],
+        ),
+      ],
     );
   }
 }

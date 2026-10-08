@@ -9,14 +9,11 @@ void main() async {
   final client = Supabase.instance.client;
 
   try {
-    final response = await client.from('return_requirements').select();
-    print('--- RETURN REQUIREMENTS TABLE ---');
-    if ((response as List).isEmpty) {
-      print('Table is EMPTY!');
-    } else {
-      for (var req in response) {
-        print(req);
-      }
+    final list = await client.from('truck_availability').select();
+    print('--- ALL TRUCK AVAILABILITY ROWS ---');
+    print('Total rows: ${list.length}');
+    for (var row in list) {
+      print('ROW: origin_city="${row['origin_city']}", destination_city="${row['destination_city']}", available_date="${row['available_date']}", status="${row['status']}"');
     }
   } catch (e) {
     print('Error: $e');

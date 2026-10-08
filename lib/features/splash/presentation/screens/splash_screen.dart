@@ -45,25 +45,52 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
     Future.delayed(const Duration(milliseconds: 2500), () async {
       final prefs = await SharedPreferences.getInstance();
       final loggedInPhone = prefs.getString('logged_in_phone');
-      
       if (mounted) {
         if (loggedInPhone != null && loggedInPhone.isNotEmpty) {
           try {
-            final customerData = await Supabase.instance.client
-                .from('customers')
-                .select()
-                .eq('phone_number', loggedInPhone)
-                .maybeSingle();
+            dynamic profileData;
+            try {
+              profileData = await Supabase.instance.client
+                  .from('profiles')
+                  .select('id, full_name')
+                  .eq('mobile', loggedInPhone)
+                  .limit(1)
+                  .maybeSingle();
+            } catch (_) {
+              profileData = await Supabase.instance.client
+                  .from('profiles')
+                  .select('id, full_name')
+                  .eq('mobile_number', loggedInPhone)
+                  .limit(1)
+                  .maybeSingle();
+            }
 
             if (mounted) {
-              if (customerData != null) {
+              if (profileData != null) {
+                // Profile exists in DB, fetch customer_id if possible
+                try {
+                  final custData = await Supabase.instance.client
+                      .from('customers')
+                      .select('id')
+                      .eq('profile_id', profileData['id'])
+                      .limit(1)
+                      .maybeSingle();
+                  if (custData != null && custData['id'] != null) {
+                    await prefs.setString('customer_id', custData['id'].toString());
+                  }
+                } catch (_) {}
+                
                 context.go('/customer_search');
               } else {
+                // No profile in DB, go to registration
                 context.go('/registration', extra: loggedInPhone);
               }
             }
           } catch (e) {
-            if (mounted) context.go('/login');
+            // Agar internet issue ho, try to go home anyway
+            if (mounted) {
+              context.go('/customer_search');
+            }
           }
         } else {
           context.go('/login');

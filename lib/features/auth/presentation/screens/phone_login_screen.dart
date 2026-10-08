@@ -87,21 +87,46 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
     try {
       final verifiedPhone = await _otpService.verifyOtp(_formattedFullPhone, enteredOtp);
       
-      // Check if user exists in customers table
-      final customerData = await Supabase.instance.client
-          .from('customers')
-          .select()
-          .eq('phone_number', verifiedPhone)
-          .maybeSingle();
+      // Check if user exists in profiles table (checking both 'mobile' and legacy 'mobile_number')
+      dynamic profileData;
+      try {
+        profileData = await Supabase.instance.client
+            .from('profiles')
+            .select('id')
+            .eq('mobile', verifiedPhone)
+            .limit(1)
+            .maybeSingle();
+      } catch (_) {
+        profileData = await Supabase.instance.client
+            .from('profiles')
+            .select('id')
+            .eq('mobile_number', verifiedPhone)
+            .limit(1)
+            .maybeSingle();
+      }
 
       if (mounted) {
-        if (customerData == null) {
+        if (profileData == null) {
           // New user, go to registration
           context.go('/registration', extra: verifiedPhone);
         } else {
-          // Existing user, save login and go to home
+          // Existing user, save login and go directly to home
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString('logged_in_phone', verifiedPhone);
+          
+          if (profileData['id'] != null) {
+            try {
+              final custData = await Supabase.instance.client
+                  .from('customers')
+                  .select('id')
+                  .eq('profile_id', profileData['id'])
+                  .limit(1)
+                  .maybeSingle();
+              if (custData != null && custData['id'] != null) {
+                await prefs.setString('customer_id', custData['id'].toString());
+              }
+            } catch (_) {}
+          }
           if (mounted) context.go('/customer_search');
         }
       }
@@ -264,9 +289,12 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
                         controller: _otpControllers[index],
                         focusNode: _otpFocusNodes[index],
                         textAlign: TextAlign.center,
+                        autofillHints: index == 0 ? const [AutofillHints.oneTimeCode] : null,
                         keyboardType: TextInputType.number,
-                        maxLength: 1,
-                        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                        inputFormatters: [
+                          LengthLimitingTextInputFormatter(6),
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
                         style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                         decoration: InputDecoration(
                           counterText: '',
@@ -283,6 +311,17 @@ class _PhoneLoginScreenState extends State<PhoneLoginScreen> {
                           contentPadding: EdgeInsets.zero,
                         ),
                         onChanged: (value) {
+                          if (value.length > 1) {
+                            // Handle OTP Paste or Autofill
+                            for (int i = 0; i < value.length && i < 6; i++) {
+                              _otpControllers[i].text = value[i];
+                            }
+                            _otpFocusNodes[value.length > 6 ? 5 : value.length - 1].requestFocus();
+                            if (value.length >= 6) {
+                              _handleVerifyOtp();
+                            }
+                            return;
+                          }
                           if (value.isNotEmpty && index < 5) {
                             _otpFocusNodes[index + 1].requestFocus();
                           } else if (value.isEmpty && index > 0) {
